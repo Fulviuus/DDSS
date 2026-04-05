@@ -1,0 +1,19 @@
+[Unit]
+Description=DDSS - Dutch Detection & Suppression System
+After=network.target sound.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/DDSS
+ExecStart=/home/pi/DDSS/venv/bin/python -m ddss.main -c /home/pi/DDSS/config.yaml
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Allow access to audio devices
+SupplementaryGroups=audio
+
+[Install]
+WantedBy=multi-user.target
