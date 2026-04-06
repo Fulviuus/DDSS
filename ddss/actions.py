@@ -61,7 +61,10 @@ class _SirenHTTPHandler(BaseHTTPRequestHandler):
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(self.server.wav_data)
+        try:
+            self.wfile.write(self.server.wav_data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # Sonos disconnects after buffering enough data
 
     def do_HEAD(self):
         logger.debug("HTTP HEAD %s from %s", self.path, self.client_address)
