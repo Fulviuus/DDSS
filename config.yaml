@@ -10,7 +10,7 @@ detection:
   model: "small"             # whisper model: tiny (fast/less accurate), base, small (recommended for Pi 5)
   language_threshold: 0.5    # minimum confidence (0.0-1.0) to trigger action
   target_language: "nl"      # ISO 639-1 code: nl=Dutch, de=German, fr=French, etc.
-  cooldown_seconds: 30       # minimum seconds between triggers
+  cooldown_seconds: 10       # minimum seconds between triggers
 
 sonos:
   speaker_name: "Roam"       # Sonos speaker name (must match Sonos app)
