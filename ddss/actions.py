@@ -1,10 +1,11 @@
+import functools
 import io
 import logging
 import socket
-import struct
 import threading
 import time
 import wave
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import numpy as np
 import soco
@@ -49,11 +50,31 @@ def _get_local_ip() -> str:
         s.close()
 
 
-class _SirenHTTPHandler:
-    """Minimal HTTP handler that serves the siren WAV file."""
+class _SirenHTTPHandler(BaseHTTPRequestHandler):
+    """HTTP handler that serves the siren WAV file."""
 
-    def __init__(self, wav_data: bytes):
-        self.wav_data = wav_data
+    def do_GET(self):
+        logger.debug("HTTP GET %s from %s", self.path, self.client_address)
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(self.server.wav_data)))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(self.server.wav_data)
+
+    def do_HEAD(self):
+        logger.debug("HTTP HEAD %s from %s", self.path, self.client_address)
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(self.server.wav_data)))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        # Suppress default stderr logging, we use our own logger
+        logger.debug("HTTP: %s", format % args)
 
 
 class _SirenServer(threading.Thread):
@@ -61,45 +82,15 @@ class _SirenServer(threading.Thread):
 
     def __init__(self, wav_data: bytes):
         super().__init__(daemon=True)
-        self.wav_data = wav_data
-        self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._server_socket.bind(("0.0.0.0", 0))
-        self.port = self._server_socket.getsockname()[1]
-        self._server_socket.listen(5)
-        self._running = True
+        self.httpd = HTTPServer(("0.0.0.0", 0), _SirenHTTPHandler)
+        self.httpd.wav_data = wav_data
+        self.port = self.httpd.server_address[1]
 
     def run(self):
-        while self._running:
-            try:
-                self._server_socket.settimeout(1.0)
-                conn, addr = self._server_socket.accept()
-                self._handle(conn)
-            except socket.timeout:
-                continue
-            except Exception as e:
-                if self._running:
-                    logger.debug("Server error: %s", e)
-
-    def _handle(self, conn: socket.socket):
-        try:
-            conn.recv(4096)  # consume the HTTP request
-            header = (
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: audio/wav\r\n"
-                f"Content-Length: {len(self.wav_data)}\r\n"
-                "Connection: close\r\n"
-                "\r\n"
-            )
-            conn.sendall(header.encode() + self.wav_data)
-        except Exception as e:
-            logger.debug("Connection error: %s", e)
-        finally:
-            conn.close()
+        self.httpd.serve_forever()
 
     def stop(self):
-        self._running = False
-        self._server_socket.close()
+        self.httpd.shutdown()
 
 
 class SonosAction:
