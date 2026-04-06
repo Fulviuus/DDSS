@@ -1,10 +1,8 @@
 import logging
-import queue
 import struct
-from collections import deque
+import sys
 
 import numpy as np
-import sounddevice as sd
 import webrtcvad
 
 from ddss.config import AudioConfig
@@ -24,12 +22,6 @@ class AudioRecorder:
         self.sample_rate = config.sample_rate
         self.chunk_samples = config.chunk_seconds * self.sample_rate
         self.vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
-        self._queue: queue.Queue[np.ndarray] = queue.Queue()
-
-    def _audio_callback(self, indata: np.ndarray, frames: int, time_info, status):
-        if status:
-            logger.warning("Audio status: %s", status)
-        self._queue.put(indata[:, 0].copy())
 
     def _has_speech(self, audio: np.ndarray) -> bool:
         """Check if audio chunk contains speech using webrtcvad."""
@@ -52,6 +44,45 @@ class AudioRecorder:
         ratio = voiced_frames / num_frames if num_frames > 0 else 0
         return ratio > 0.15  # at least 15% of frames have speech
 
+    def _open_stream(self):
+        """Open an audio input stream using the best available backend."""
+        device = self.config.device
+
+        # Try alsaaudio first (direct ALSA, works reliably on Pi)
+        try:
+            import alsaaudio
+
+            alsa_device = device if isinstance(device, str) else "default"
+            pcm = alsaaudio.PCM(
+                alsaaudio.PCM_CAPTURE,
+                channels=1,
+                rate=self.sample_rate,
+                format=alsaaudio.PCM_FORMAT_S16_LE,
+                periodsize=int(self.sample_rate * VAD_FRAME_MS / 1000),
+                device=alsa_device,
+            )
+            logger.info("Using ALSA backend (device=%s)", alsa_device)
+            return ("alsa", pcm)
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning("ALSA failed: %s, trying sounddevice", e)
+
+        # Fall back to sounddevice/PortAudio (works on Windows/Mac)
+        import sounddevice as sd
+
+        block_samples = int(self.sample_rate * VAD_FRAME_MS / 1000)
+        stream = sd.InputStream(
+            samplerate=self.sample_rate,
+            channels=1,
+            dtype="float32",
+            blocksize=block_samples,
+            device=device if isinstance(device, int) else None,
+        )
+        stream.start()
+        logger.info("Using PortAudio/sounddevice backend (device=%s)", device)
+        return ("sounddevice", stream)
+
     def stream(self):
         """Yield audio chunks (numpy float32 arrays) that contain speech.
 
@@ -64,31 +95,41 @@ class AudioRecorder:
             self.config.chunk_seconds,
         )
 
-        # Use a small block size for the callback; we'll accumulate into chunks
-        block_samples = int(self.sample_rate * VAD_FRAME_MS / 1000)
+        backend, handle = self._open_stream()
+        overlap_samples = self.sample_rate  # 1 second overlap
+        buffer = []
+        buffered_samples = 0
 
-        with sd.InputStream(
-            samplerate=self.sample_rate,
-            channels=1,
-            dtype="float32",
-            blocksize=block_samples,
-            device=self.config.device,
-            callback=self._audio_callback,
-        ):
-            buffer = deque()
-            buffered_samples = 0
-
+        try:
             while True:
-                block = self._queue.get()
+                if backend == "alsa":
+                    length, data = handle.read()
+                    if length <= 0:
+                        continue
+                    block = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32767.0
+                else:
+                    # sounddevice
+                    block_size = int(self.sample_rate * VAD_FRAME_MS / 1000)
+                    data, overflowed = handle.read(block_size)
+                    if overflowed:
+                        logger.warning("Audio buffer overflow")
+                    block = data[:, 0]
+
                 buffer.append(block)
                 buffered_samples += len(block)
 
                 if buffered_samples >= self.chunk_samples:
-                    chunk = np.concatenate(list(buffer))
-                    # Keep last second as overlap for next chunk
-                    overlap_samples = self.sample_rate
-                    keep_from = max(0, len(buffer) - overlap_samples // block_samples)
-                    buffer = deque(list(buffer)[keep_from:])
+                    chunk = np.concatenate(buffer)
+
+                    # Keep last second as overlap
+                    keep_samples = 0
+                    kept = []
+                    for b in reversed(buffer):
+                        keep_samples += len(b)
+                        kept.append(b)
+                        if keep_samples >= overlap_samples:
+                            break
+                    buffer = list(reversed(kept))
                     buffered_samples = sum(len(b) for b in buffer)
 
                     if self._has_speech(chunk):
@@ -96,3 +137,9 @@ class AudioRecorder:
                         yield chunk
                     else:
                         logger.debug("Silence, skipping chunk")
+        finally:
+            if backend == "alsa":
+                handle.close()
+            else:
+                handle.stop()
+                handle.close()

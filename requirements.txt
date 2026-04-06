@@ -1,5 +1,6 @@
 faster-whisper>=1.0.0
 sounddevice>=0.4.6
+pyalsaaudio>=0.10.0; sys_platform == 'linux'
 webrtcvad-wheels>=2.0.11
 soco>=0.30
 pyyaml>=6.0

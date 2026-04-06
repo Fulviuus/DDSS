@@ -2,7 +2,7 @@ import yaml
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ DEFAULTS = {
 
 @dataclass
 class AudioConfig:
-    device: Optional[int] = None
+    device: Union[None, int, str] = None  # None=default, int=PortAudio index, str=ALSA device name
     chunk_seconds: int = 5
     sample_rate: int = 16000
 

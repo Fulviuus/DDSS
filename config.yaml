@@ -2,7 +2,7 @@
 # "Niente olandese in questa casa!"
 
 audio:
-  device: null               # null = default USB mic, or integer device index
+  device: null               # null = default, integer = PortAudio index (Windows), string = ALSA device (Linux, e.g. "hw:CARD=Device,DEV=0")
   chunk_seconds: 5           # seconds of audio per detection chunk
   sample_rate: 16000         # 16kHz required by Whisper
 
