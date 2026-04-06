@@ -4,9 +4,9 @@ After=network.target sound.target
 
 [Service]
 Type=simple
-User=fulvio
-WorkingDirectory=/home/fulvio/DDSS
-ExecStart=/home/fulvio/DDSS/venv/bin/python -m ddss.main -c /home/fulvio/DDSS/config.yaml
+User=%i
+WorkingDirectory=/home/%i/DDSS
+ExecStart=/home/%i/DDSS/venv/bin/python -m ddss.main -c /home/%i/DDSS/config.yaml
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal

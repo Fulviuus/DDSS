@@ -119,16 +119,18 @@ python -m ddss.main -c /path/to/config.yaml
 
 ## Auto-Start on Raspberry Pi
 
+The service file uses `@` templating — pass your username after the `@`:
+
 ```bash
-sudo cp systemd/ddss.service /etc/systemd/system/
-sudo systemctl enable ddss
-sudo systemctl start ddss
+sudo cp systemd/ddss@.service /etc/systemd/system/
+sudo systemctl enable ddss@$(whoami)
+sudo systemctl start ddss@$(whoami)
 
 # Check status
-sudo systemctl status ddss
+sudo systemctl status ddss@$(whoami)
 
 # View logs
-journalctl -u ddss -f
+journalctl -u ddss@$(whoami) -f
 ```
 
 ## Targeting Other Languages
