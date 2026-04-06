@@ -29,9 +29,10 @@ So naturally, you built an AI-powered language detection system that blasts a si
 ```
 
 1. **Listens** continuously via a USB microphone (Tonor TM20)
-2. **Filters silence** using voice activity detection (no, the fridge humming won't trigger it)
-3. **Detects language** using OpenAI's Whisper model running locally — no cloud, no API fees, no evidence
-4. **Blasts a siren** on your Sonos speaker when Dutch is detected
+2. **Filters silence** using dual-layer VAD (webrtcvad + Whisper's built-in Silero VAD)
+3. **Transcribes and detects language** using OpenAI's Whisper running locally — no cloud, no API fees, no evidence. You can even see what they said in the logs.
+4. **Confirms with consensus** — requires 2 out of 3 consecutive chunks to detect Dutch before triggering, so a single mumble won't set it off
+5. **Blasts a siren** on your Sonos speaker when Dutch is confirmed
 
 The siren is a lovely two-tone 800Hz/1200Hz masterpiece, procedurally generated in memory. Think European ambulance, but for linguistic emergencies.
 
@@ -57,7 +58,7 @@ pip install -r requirements.txt
 
 On Raspberry Pi, you'll also need:
 ```bash
-sudo apt install libportaudio2 libsndfile1 python3-dev
+sudo apt install libportaudio2 libsndfile1 python3-dev portaudio19-dev
 ```
 
 ## Configuration
@@ -66,7 +67,8 @@ Edit `config.yaml`:
 
 ```yaml
 audio:
-  device: null              # null = default mic, or device index
+  device: null              # null = default, int = PortAudio index (Windows),
+                            # string = ALSA device (Linux, e.g. "plughw:CARD=Device,DEV=0")
   chunk_seconds: 5          # audio chunk size for detection
   sample_rate: 16000
 
@@ -74,7 +76,7 @@ detection:
   model: "small"            # tiny | base | small (bigger = more accurate, slower)
   language_threshold: 0.5   # confidence threshold (0.0 - 1.0)
   target_language: "nl"     # the forbidden language
-  cooldown_seconds: 30      # grace period between sirens (we're not monsters)
+  cooldown_seconds: 10      # grace period between sirens (we're not monsters)
 
 sonos:
   speaker_name: "Roam"      # your Sonos speaker name
@@ -84,8 +86,16 @@ sonos:
 
 ### Finding your audio device
 
+**On Linux (Raspberry Pi):**
+```bash
+arecord -l
+# Then use the ALSA device string, e.g. "plughw:CARD=Device,DEV=0"
+```
+
+**On Windows/Mac:**
 ```bash
 python -c "import sounddevice; print(sounddevice.query_devices())"
+# Then use the integer device index
 ```
 
 ## Usage
@@ -104,17 +114,19 @@ python -m ddss.main -c /path/to/config.yaml
 ### Sample Output
 
 ```
-15:49:00 [INFO] ddss: DDSS - Dutch Detection & Suppression System
-15:49:00 [INFO] ddss: Niente olandese in questa casa!
-15:49:01 [INFO] ddss.detector: Loading Whisper model 'small'...
-15:49:05 [INFO] ddss.actions: Found Sonos speaker: Roam (192.168.1.42)
-15:49:05 [INFO] ddss: Listening... (cooldown=30s, threshold=50%)
-15:49:10 [INFO] ddss.detector: Detected language: it (87.3%) | target 'nl' threshold 50%
-15:49:15 [INFO] ddss.detector: Detected language: it (92.1%) | target 'nl' threshold 50%
-15:49:20 [INFO] ddss.detector: Detected language: nl (78.5%) | target 'nl' threshold 50%
-15:49:20 [WARNING] ddss: DUTCH DETECTED! (occurrence #1) — triggering action
-15:49:20 [INFO] ddss.actions: Playing siren on 'Roam' at volume 100
-15:49:26 [INFO] ddss.actions: Siren complete, volume restored to 30
+18:44:04 [INFO] ddss: DDSS - Dutch Detection & Suppression System
+18:44:04 [INFO] ddss: Niente olandese in questa casa!
+18:44:04 [INFO] ddss.detector: Loading Whisper model 'small'...
+18:44:04 [INFO] ddss.actions: Found Sonos speaker: Roam (192.168.1.42)
+18:44:04 [INFO] ddss: Listening... (cooldown=10s, threshold=50%)
+18:44:25 [INFO] ddss.detector: Detected: it (95.7%) | "E' un quattro"
+18:44:33 [INFO] ddss.detector: Detected: it (88.2%) | "Mamma, posso avere un gelato?"
+18:44:41 [INFO] ddss.detector: Detected: nl (82.4%) | "Ik wil niet"
+18:44:41 [INFO] ddss.detector: Target language match (1/1 in last 3 chunks, need 2)
+18:44:49 [INFO] ddss.detector: Detected: nl (91.0%) | "Maar ik heb honger"
+18:44:49 [WARNING] ddss: DUTCH DETECTED! (occurrence #1) — triggering action
+18:44:49 [INFO] ddss.actions: Playing siren on 'Roam' at volume 100
+18:44:55 [INFO] ddss.actions: Siren complete, volume restored to 30
 ```
 
 ## Auto-Start on Raspberry Pi
@@ -162,12 +174,16 @@ A: That's not a question. But yes, the cat now speaks Italian.
 **Q: Does it work with dialects?**
 A: Whisper handles standard Dutch well. If your kids start speaking Limburgish to bypass the system, congratulations — you've raised hackers.
 
+**Q: It detected my kid saying "Ik wil niet" — what does that mean?**
+A: "I don't want to." Ironic, because the siren doesn't care what they want.
+
 ## Tech Stack
 
-- **[faster-whisper](https://github.com/SYSTRAN/faster-whisper)** — CTranslate2-optimized Whisper, 3-5x faster than vanilla, runs on Pi 5 with int8 quantization
+- **[faster-whisper](https://github.com/SYSTRAN/faster-whisper)** — CTranslate2-optimized Whisper, 3-5x faster than vanilla, runs on Pi 5 with int8 quantization. Full transcription for accurate language detection.
 - **[webrtcvad](https://github.com/wiseman/py-webrtcvad)** — Voice activity detection to skip silence
+- **[pyalsaaudio](https://github.com/larsimmisch/pyalsaaudio)** — Direct ALSA audio capture on Linux (because PortAudio has opinions about Raspberry Pi)
+- **[sounddevice](https://python-sounddevice.readthedocs.io/)** — Cross-platform audio capture fallback (Windows/Mac)
 - **[SoCo](https://github.com/SoCo/SoCo)** — Sonos control library
-- **[sounddevice](https://python-sounddevice.readthedocs.io/)** — Cross-platform audio capture
 - **numpy** — For generating the siren that haunts your children's dreams
 
 ## License
