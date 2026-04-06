@@ -1,150 +1,172 @@
+import io
 import logging
+import socket
+import struct
 import threading
 import time
+import wave
 
-from phue import Bridge
+import numpy as np
+import soco
 
-from ddss.config import HueConfig
+from ddss.config import SonosConfig
 
 logger = logging.getLogger(__name__)
 
 
-class HueAction:
-    """Controls Philips Hue lights in response to Dutch detection."""
+def _generate_siren_wav(duration_seconds: int, sample_rate: int = 44100) -> bytes:
+    """Generate a two-tone siren WAV file in memory.
 
-    def __init__(self, config: HueConfig):
-        self.config = config
-        self._saved_states: dict[int, dict] = {}
-        self._restore_timers: list[threading.Timer] = []
+    Alternates between 800Hz and 1200Hz every 0.5 seconds.
+    """
+    t = np.linspace(0, duration_seconds, duration_seconds * sample_rate, dtype=np.float32)
 
-        logger.info("Connecting to Hue bridge at %s...", config.bridge_ip)
-        self.bridge = Bridge(config.bridge_ip)
-        self.bridge.connect()
-        logger.info("Connected to Hue bridge")
+    # Alternate between two frequencies every 0.5s
+    cycle = 0.5
+    freq = np.where((t % (cycle * 2)) < cycle, 800.0, 1200.0)
 
-        self.light_ids = self._resolve_lights()
-        if not self.light_ids:
-            logger.warning("No matching lights found! Check config.hue.lights")
+    # Generate sine wave
+    phase = np.cumsum(freq / sample_rate) * 2 * np.pi
+    samples = (np.sin(phase) * 0.9 * 32767).astype(np.int16)
 
-    def _resolve_lights(self) -> list[int]:
-        """Resolve light names to IDs."""
-        all_lights = self.bridge.get_light_objects("name")
-        ids = []
-        for name in self.config.lights:
-            if name in all_lights:
-                light = all_lights[name]
-                ids.append(light.light_id)
-                logger.info("Resolved light '%s' -> ID %d", name, light.light_id)
-            else:
-                logger.warning(
-                    "Light '%s' not found. Available: %s",
-                    name,
-                    list(all_lights.keys()),
-                )
-        return ids
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(samples.tobytes())
 
-    def _save_states(self):
-        """Save current light states for later restoration."""
-        for lid in self.light_ids:
-            state = self.bridge.get_light(lid)["state"]
-            self._saved_states[lid] = {
-                "on": state["on"],
-                "bri": state.get("bri", 254),
-                "hue": state.get("hue", 0),
-                "sat": state.get("sat", 0),
-            }
+    return buf.getvalue()
 
-    def _restore_states(self):
-        """Restore lights to their saved states."""
-        logger.info("Restoring light states")
-        for lid, state in self._saved_states.items():
+
+def _get_local_ip() -> str:
+    """Get the local IP address that can reach the network."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    finally:
+        s.close()
+
+
+class _SirenHTTPHandler:
+    """Minimal HTTP handler that serves the siren WAV file."""
+
+    def __init__(self, wav_data: bytes):
+        self.wav_data = wav_data
+
+
+class _SirenServer(threading.Thread):
+    """Background HTTP server that serves the siren WAV."""
+
+    def __init__(self, wav_data: bytes):
+        super().__init__(daemon=True)
+        self.wav_data = wav_data
+        self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._server_socket.bind(("0.0.0.0", 0))
+        self.port = self._server_socket.getsockname()[1]
+        self._server_socket.listen(5)
+        self._running = True
+
+    def run(self):
+        while self._running:
             try:
-                self.bridge.set_light(lid, state)
+                self._server_socket.settimeout(1.0)
+                conn, addr = self._server_socket.accept()
+                self._handle(conn)
+            except socket.timeout:
+                continue
             except Exception as e:
-                logger.error("Failed to restore light %d: %s", lid, e)
-        self._saved_states.clear()
+                if self._running:
+                    logger.debug("Server error: %s", e)
 
-    def _schedule_restore(self):
-        """Schedule light state restoration after configured delay."""
-        if self.config.restore_after_seconds > 0:
-            timer = threading.Timer(self.config.restore_after_seconds, self._restore_states)
-            timer.daemon = True
-            timer.start()
-            self._restore_timers.append(timer)
-            logger.info("Will restore lights in %ds", self.config.restore_after_seconds)
+    def _handle(self, conn: socket.socket):
+        try:
+            conn.recv(4096)  # consume the HTTP request
+            header = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: audio/wav\r\n"
+                f"Content-Length: {len(self.wav_data)}\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            )
+            conn.sendall(header.encode() + self.wav_data)
+        except Exception as e:
+            logger.debug("Connection error: %s", e)
+        finally:
+            conn.close()
 
-    def _action_off(self):
-        """Turn off all configured lights."""
-        logger.info("Turning off %d light(s)", len(self.light_ids))
-        for lid in self.light_ids:
-            self.bridge.set_light(lid, "on", False)
+    def stop(self):
+        self._running = False
+        self._server_socket.close()
 
-    def _action_flash(self):
-        """Flash lights with configured color."""
-        color = self.config.flash_color
-        logger.info("Flashing %d light(s)", len(self.light_ids))
-        for lid in self.light_ids:
-            self.bridge.set_light(
-                lid,
-                {
-                    "on": True,
-                    "hue": color.hue,
-                    "sat": color.saturation,
-                    "bri": color.brightness,
-                    "alert": "lselect",  # 15-second flash cycle
-                },
+
+class SonosAction:
+    """Plays a siren on a Sonos speaker when triggered."""
+
+    def __init__(self, config: SonosConfig):
+        self.config = config
+
+        # Generate siren WAV
+        logger.info("Generating %ds siren audio...", config.siren_duration_seconds)
+        self._wav_data = _generate_siren_wav(config.siren_duration_seconds)
+
+        # Start HTTP server to serve the WAV
+        self._server = _SirenServer(self._wav_data)
+        self._server.start()
+        self._local_ip = _get_local_ip()
+        self._siren_url = f"http://{self._local_ip}:{self._server.port}/siren.wav"
+        logger.info("Siren served at %s", self._siren_url)
+
+        # Find the Sonos speaker
+        logger.info("Discovering Sonos speaker '%s'...", config.speaker_name)
+        self.speaker = self._find_speaker()
+        if self.speaker:
+            logger.info("Found Sonos speaker: %s (%s)", self.speaker.player_name, self.speaker.ip_address)
+        else:
+            logger.error(
+                "Speaker '%s' not found. Available speakers: %s",
+                config.speaker_name,
+                [s.player_name for s in soco.discover() or []],
             )
 
-    def _action_flash_then_off(self):
-        """Flash lights, then turn them off after a brief delay."""
-        self._action_flash()
-        time.sleep(3)
-        self._action_off()
-
-    def _action_color_alert(self):
-        """Set lights to alert color (stays on)."""
-        color = self.config.flash_color
-        logger.info("Setting %d light(s) to alert color", len(self.light_ids))
-        for lid in self.light_ids:
-            self.bridge.set_light(
-                lid,
-                {
-                    "on": True,
-                    "hue": color.hue,
-                    "sat": color.saturation,
-                    "bri": color.brightness,
-                },
-            )
+    def _find_speaker(self) -> soco.SoCo | None:
+        speakers = soco.discover()
+        if not speakers:
+            logger.error("No Sonos speakers found on the network")
+            return None
+        for speaker in speakers:
+            if speaker.player_name == self.config.speaker_name:
+                return speaker
+        return None
 
     def trigger(self):
-        """Execute the configured action."""
-        if not self.light_ids:
-            logger.warning("No lights configured, skipping action")
+        if not self.speaker:
+            logger.warning("No Sonos speaker available, skipping siren")
             return
 
-        self._save_states()
+        logger.info("Playing siren on '%s' at volume %d", self.speaker.player_name, self.config.volume)
 
-        actions = {
-            "off": self._action_off,
-            "flash": self._action_flash,
-            "flash_then_off": self._action_flash_then_off,
-            "color_alert": self._action_color_alert,
-        }
-
-        action_fn = actions.get(self.config.action)
-        if action_fn is None:
-            logger.error(
-                "Unknown action '%s'. Available: %s",
-                self.config.action,
-                list(actions.keys()),
-            )
-            return
-
-        logger.info("Executing action: %s", self.config.action)
         try:
-            action_fn()
-        except Exception as e:
-            logger.error("Action failed: %s", e)
-            return
+            # Save current state
+            prev_volume = self.speaker.volume
+            prev_uri = self.speaker.get_current_transport_info().get("current_transport_state")
 
-        self._schedule_restore()
+            # Set volume and play siren
+            self.speaker.volume = self.config.volume
+            self.speaker.play_uri(self._siren_url, title="DDSS SIREN - Niente olandese!")
+
+            # Wait for siren to finish
+            time.sleep(self.config.siren_duration_seconds + 1)
+
+            # Restore previous volume
+            self.speaker.volume = prev_volume
+            self.speaker.stop()
+            logger.info("Siren complete, volume restored to %d", prev_volume)
+
+        except Exception as e:
+            logger.error("Failed to play siren: %s", e)
+
+    def shutdown(self):
+        self._server.stop()

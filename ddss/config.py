@@ -18,12 +18,10 @@ DEFAULTS = {
         "target_language": "nl",
         "cooldown_seconds": 30,
     },
-    "hue": {
-        "bridge_ip": "192.168.1.1",
-        "lights": [],
-        "action": "flash_then_off",
-        "flash_color": {"hue": 0, "saturation": 254, "brightness": 254},
-        "restore_after_seconds": 60,
+    "sonos": {
+        "speaker_name": "Living Room",
+        "volume": 50,
+        "siren_duration_seconds": 5,
     },
 }
 
@@ -44,26 +42,17 @@ class DetectionConfig:
 
 
 @dataclass
-class FlashColor:
-    hue: int = 0
-    saturation: int = 254
-    brightness: int = 254
-
-
-@dataclass
-class HueConfig:
-    bridge_ip: str = "192.168.1.1"
-    lights: list[str] = field(default_factory=list)
-    action: str = "flash_then_off"
-    flash_color: FlashColor = field(default_factory=FlashColor)
-    restore_after_seconds: int = 60
+class SonosConfig:
+    speaker_name: str = "Living Room"
+    volume: int = 50
+    siren_duration_seconds: int = 5
 
 
 @dataclass
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     detection: DetectionConfig = field(default_factory=DetectionConfig)
-    hue: HueConfig = field(default_factory=HueConfig)
+    sonos: SonosConfig = field(default_factory=SonosConfig)
 
 
 def _merge(defaults: dict, overrides: dict) -> dict:
@@ -88,9 +77,8 @@ def load_config(path: str | Path = "config.yaml") -> Config:
 
     merged = _merge(DEFAULTS, raw)
 
-    flash_color = FlashColor(**merged["hue"].pop("flash_color"))
     return Config(
         audio=AudioConfig(**merged["audio"]),
         detection=DetectionConfig(**merged["detection"]),
-        hue=HueConfig(flash_color=flash_color, **merged["hue"]),
+        sonos=SonosConfig(**merged["sonos"]),
     )

@@ -1,16 +1,15 @@
 """DDSS - Dutch Detection & Suppression System
 
-Continuously listens to ambient speech and triggers Philips Hue actions
+Continuously listens to ambient speech and plays a siren on Sonos
 when Dutch is detected.
 """
 
 import argparse
 import logging
 import signal
-import sys
 import time
 
-from ddss.actions import HueAction
+from ddss.actions import SonosAction
 from ddss.audio import AudioRecorder
 from ddss.config import load_config
 from ddss.detector import LanguageDetector
@@ -34,7 +33,7 @@ def main():
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Detect language but don't trigger Hue actions",
+        help="Detect language but don't trigger Sonos siren",
     )
     args = parser.parse_args()
 
@@ -48,15 +47,15 @@ def main():
     recorder = AudioRecorder(config.audio)
     detector = LanguageDetector(config.detection)
 
-    hue = None
+    sonos = None
     if not args.dry_run:
         try:
-            hue = HueAction(config.hue)
+            sonos = SonosAction(config.sonos)
         except Exception as e:
-            logger.error("Failed to connect to Hue bridge: %s", e)
+            logger.error("Failed to connect to Sonos: %s", e)
             logger.info("Continuing in detection-only mode")
     else:
-        logger.info("Dry-run mode: Hue actions disabled")
+        logger.info("Dry-run mode: Sonos siren disabled")
 
     # Graceful shutdown
     running = True
@@ -91,8 +90,8 @@ def main():
                         "DUTCH DETECTED! (occurrence #%d) — triggering action",
                         dutch_count,
                     )
-                    if hue:
-                        hue.trigger()
+                    if sonos:
+                        sonos.trigger()
                     last_trigger = now
                 else:
                     remaining = cooldown - elapsed
@@ -103,6 +102,8 @@ def main():
     except KeyboardInterrupt:
         pass
 
+    if sonos:
+        sonos.shutdown()
     logger.info("DDSS stopped. Total Dutch detections: %d", dutch_count)
 
 
